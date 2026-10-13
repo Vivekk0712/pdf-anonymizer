@@ -39,7 +39,7 @@ INSTITUTION_KEYWORDS = [
 
 # Patterns for author notes and correspondence in page 1 footnotes
 FOOTNOTE_CORRESPONDENCE_REGEX = re.compile(
-    r"\b(?:corresponding author|authors? (?:is|are) with|manuscript received|this work was supported by|contact author)\b",
+    r"\b(?:email\s+addresses?|e-?mails?|corresponding\s+author|authors?\s+(?:is|are)\s+with|manuscript\s+received|this\s+work\s+was\s+supported\s+by|supported\s+by|contact\s+author)\b",
     re.IGNORECASE,
 )
 
@@ -132,14 +132,32 @@ class PDFDetector:
         if not text_blocks:
             return targets
 
+        # Filter text blocks, discarding vertical margin watermarks (e.g. arXiv banners)
+        valid_blocks = []
+        for b in text_blocks:
+            b_text = " ".join(span.get("text", "") for line in b.get("lines", []) for span in line.get("spans", []))
+            bbox = b.get("bbox", (0, 0, 0, 0))
+            w = bbox[2] - bbox[0]
+            h = bbox[3] - bbox[1]
+
+            # Discard arXiv vertical strips and margin banners
+            if "arxiv:" in b_text.lower():
+                continue
+            if h > w * 2 and (bbox[0] < 60 or bbox[2] > page.rect.width - 60):
+                continue
+            valid_blocks.append(b)
+
+        if not valid_blocks:
+            return targets
+
         page_height = page.rect.height
 
         # Step 1: Locate candidate paper title
         # In research papers, title is near top (usually y0 < 0.45 * page_height)
-        # and has maximum or near-maximum font size.
+        # and has maximum font size among valid horizontal blocks.
         max_font_size = 0.0
 
-        for b in text_blocks:
+        for b in valid_blocks:
             bbox = b.get("bbox", (0, 0, 0, 0))
             if bbox[1] > 0.45 * page_height:
                 continue
@@ -163,20 +181,20 @@ class PDFDetector:
 
         # Title bottom coordinate
         title_bottom_y = 0.0
-        for b in text_blocks:
+        for b in valid_blocks:
             bbox = b.get("bbox", (0, 0, 0, 0))
             if bbox[1] > 0.45 * page_height:
                 continue
             for line in b.get("lines", []):
                 for span in line.get("spans", []):
-                    if span.get("size", 0.0) >= max(12.0, max_font_size * 0.85):
+                    if span.get("size", 0.0) >= max(11.0, max_font_size * 0.85):
                         if bbox[3] > title_bottom_y:
                             title_bottom_y = bbox[3]
                         break
 
         # Step 2: Locate Abstract / Stop marker
         abstract_top_y = None
-        for b in text_blocks:
+        for b in valid_blocks:
             bbox = b.get("bbox", (0, 0, 0, 0))
             for line in b.get("lines", []):
                 line_text = "".join(span.get("text", "") for span in line.get("spans", [])).strip()
@@ -187,7 +205,7 @@ class PDFDetector:
 
         # Step 3: Identify Author Zone strictly between Title and Abstract
         if title_bottom_y > 0 and abstract_top_y and abstract_top_y > title_bottom_y:
-            for b in text_blocks:
+            for b in valid_blocks:
                 b_bbox = b.get("bbox", (0, 0, 0, 0))
                 # Leave 2pt buffer so title and abstract themselves are never redacted
                 if b_bbox[1] >= title_bottom_y - 2 and b_bbox[3] <= abstract_top_y + 2:
@@ -409,9 +427,9 @@ class PDFDetector:
 
                 intersect = r1.intersect(r2)
                 if not intersect.is_empty:
-                    area1 = r1.get_area()
-                    area2 = r2.get_area()
-                    int_area = intersect.get_area()
+                    area1 = abs(r1)
+                    area2 = abs(r2)
+                    int_area = abs(intersect)
                     min_area = min(area1, area2) if min(area1, area2) > 0 else 1.0
 
                     if int_area / min_area > 0.85:
