@@ -3,6 +3,7 @@ A privacy-focused, layout-preserving tool for removing author identities from re
 """
 
 import io
+import re
 import streamlit as st
 import pandas as pd
 from PIL import Image
@@ -227,8 +228,14 @@ with st.sidebar:
     )
 
     custom_keywords = [
-        k.strip() for k in custom_keywords_input.replace("\n", ",").split(",") if k.strip()
+        k.strip() for k in re.split(r"[\r\n,;]+", custom_keywords_input) if k.strip()
     ]
+
+    if custom_keywords:
+        st.caption(
+            f"🎯 **{len(custom_keywords)} active keyword(s):** "
+            + ", ".join([f"`{k}`" for k in custom_keywords])
+        )
 
     st.markdown("---")
     st.markdown("#### **Document Sanitization**")
@@ -346,6 +353,24 @@ if st.session_state.uploaded_files_data:
         )
         st.dataframe(staged_df, use_container_width=True, hide_index=True)
 
+# Track settings signature
+current_settings_signature = (
+    scope_page1,
+    detect_page1,
+    detect_footnotes,
+    detect_emails,
+    detect_orcid,
+    detect_affils_all,
+    tuple(custom_keywords),
+    strip_meta,
+    remove_annots,
+)
+
+if st.session_state.results and st.session_state.get("applied_settings_signature") != current_settings_signature:
+    st.warning(
+        "⚠️ **Keywords or settings were updated!** Click **'🚀 Anonymize All Documents'** below to re-process and apply changes."
+    )
+
 # Action Bar
 col_action1, col_action2, _ = st.columns([2, 2, 4])
 with col_action1:
@@ -401,6 +426,7 @@ if process_btn and st.session_state.uploaded_files_data:
 
     progress_bar.progress(1.0, text="Sanitization complete!")
     st.session_state.results = results
+    st.session_state.applied_settings_signature = current_settings_signature
     st.session_state.preview_cache = {}  # Invalidate preview cache
     st.toast("Batch sanitization finished successfully!", icon="✅")
 

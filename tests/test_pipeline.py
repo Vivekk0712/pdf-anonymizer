@@ -254,6 +254,51 @@ def test_extract_pdfs_from_zip():
     assert not any("__MACOSX" in k for k in extracted.keys())
 
 
+def test_multi_word_custom_keywords_redaction():
+    """Validates that multi-word phrases and multiple keywords like TODO and RELATED WORK are redacted across all pages."""
+    pdf_bytes = create_synthetic_research_paper()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+    # Insert custom keywords: one single-word (TODO on page 1), one multi-word (RELATED WORK on page 2)
+    # Notice: create_synthetic_research_paper already has '2. Methodology & Related Work' on Page 2!
+    page1 = doc[0]
+    page1.insert_text((50, 450), "TODO: Check author affiliations before submission", fontsize=10)
+
+    test_bytes = doc.tobytes()
+    doc.close()
+
+    # Pass multiple keywords separated across lines
+    raw_keywords_input = "TODO\nRELATED WORK"
+    import re
+    keywords = [k.strip() for k in re.split(r"[\r\n,;]+", raw_keywords_input) if k.strip()]
+
+    check_doc = fitz.open(stream=test_bytes, filetype="pdf")
+    detector = PDFDetector(scope_to_page1=True, custom_keywords=keywords)
+    targets = detector.detect_all(check_doc)
+
+    # Verify both TODO and RELATED WORK are detected
+    custom_targets = [t for t in targets if t.category == "custom"]
+    custom_texts = [t.text for t in custom_targets]
+
+    assert any("TODO" in txt for txt in custom_texts), "Single-word keyword 'TODO' must be detected"
+    assert any("RELATED WORK" in txt.upper() for txt in custom_texts), "Multi-word phrase 'RELATED WORK' must be detected"
+
+    # Redact
+    redactor = PDFRedactor()
+    res = redactor.redact_document(check_doc, targets, filename="multi_kw.pdf")
+
+    # Verify both are unsearchable in sanitized document
+    sanitized_doc = fitz.open(stream=res.output_pdf_bytes, filetype="pdf")
+    p0_clean = sanitized_doc[0].get_text()
+    p1_clean = sanitized_doc[1].get_text()
+
+    assert "TODO" not in p0_clean, "TODO must be redacted on page 0"
+    assert "Related Work" not in p1_clean, "RELATED WORK must be redacted on page 1"
+
+    sanitized_doc.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
 

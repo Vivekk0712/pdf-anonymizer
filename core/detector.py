@@ -95,7 +95,7 @@ class PDFDetector:
             footnote_targets = self._detect_page1_footnotes(doc[0])
             targets.extend(footnote_targets)
 
-        # 3. Pattern detection (emails, ORCID, custom keywords)
+        # 3. Standard Pattern detection (emails, ORCID, affiliations)
         for page_num in pages_to_scan:
             page = doc[page_num]
 
@@ -110,10 +110,12 @@ class PDFDetector:
                     kw_re = re.compile(kw_pattern, re.IGNORECASE)
                     targets.extend(self._detect_regex_targets(page, page_num, kw_re, "Institution Affiliation", "affiliation"))
 
-            if self.custom_keywords:
+        # 4. Custom Keywords: Explicit user instructions, scanned across ALL pages of the document
+        if self.custom_keywords:
+            for page_num in range(len(doc)):
+                page = doc[page_num]
                 for kw in self.custom_keywords:
-                    kw_re = re.compile(re.escape(kw), re.IGNORECASE)
-                    targets.extend(self._detect_regex_targets(page, page_num, kw_re, f"Custom Keyword: '{kw}'", "custom"))
+                    targets.extend(self._detect_custom_keyword(page, page_num, kw))
 
         # Deduplicate targets on same page with identical or overlapping bboxes
         deduped = self._deduplicate_targets(targets)
@@ -291,6 +293,38 @@ class PDFDetector:
 
         return targets
 
+    def _detect_custom_keyword(
+        self, page: fitz.Page, page_num: int, keyword: str
+    ) -> List[RedactionTarget]:
+        """Detect custom keywords or multi-word phrases across the page."""
+        targets: List[RedactionTarget] = []
+        kw = keyword.strip()
+        if not kw:
+            return targets
+
+        # 1. Primary: full-page text search (handles multi-word phrases, case variations, font spans)
+        rects = page.search_for(kw)
+        for r in rects:
+            targets.append(
+                RedactionTarget(
+                    page_num=page_num,
+                    bbox=(r.x0, r.y0, r.x1, r.y1),
+                    text=kw,
+                    reason=f"Custom Keyword: '{kw}'",
+                    category="custom",
+                )
+            )
+
+        # 2. Fallback: if search_for returned nothing, check line-by-line using case-insensitive regex
+        if not rects:
+            try:
+                kw_re = re.compile(re.escape(kw), re.IGNORECASE)
+                targets.extend(self._detect_regex_targets(page, page_num, kw_re, f"Custom Keyword: '{kw}'", "custom"))
+            except Exception:
+                pass
+
+        return targets
+
     def _detect_regex_targets(
         self,
         page: fitz.Page,
@@ -307,18 +341,41 @@ class PDFDetector:
             if b.get("type") != 0:
                 continue
             for line in b.get("lines", []):
+                found_in_span = False
                 for span in line.get("spans", []):
                     span_text = span.get("text", "")
                     matches = list(pattern.finditer(span_text))
                     if not matches:
                         continue
-
+                    found_in_span = True
                     for match in matches:
                         matched_str = match.group(0)
                         span_rect = fitz.Rect(span["bbox"])
                         rects = page.search_for(matched_str, clip=span_rect)
                         if not rects:
                             rects = [span_rect]
+
+                        for r in rects:
+                            targets.append(
+                                RedactionTarget(
+                                    page_num=page_num,
+                                    bbox=(r.x0, r.y0, r.x1, r.y1),
+                                    text=matched_str,
+                                    reason=reason,
+                                    category=category,
+                                )
+                            )
+
+                # Fallback to line-level check if multi-word pattern crossed spans
+                if not found_in_span:
+                    line_text = "".join(span.get("text", "") for span in line.get("spans", []))
+                    line_matches = list(pattern.finditer(line_text))
+                    for match in line_matches:
+                        matched_str = match.group(0)
+                        line_rect = fitz.Rect(line["bbox"])
+                        rects = page.search_for(matched_str, clip=line_rect)
+                        if not rects:
+                            rects = [line_rect]
 
                         for r in rects:
                             targets.append(
