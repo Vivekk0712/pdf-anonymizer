@@ -9,7 +9,8 @@ A privacy-focused, local-first bulk anonymization tool for preparing research pa
 - **Safe Page 1 Scoping (Default)**: Restricts author identity redactions strictly to the first page. Guarantees that university citations, reference lists, benchmarks, and dataset names (e.g. *"Stanford Cars Dataset"*, *"Oxford Flowers"*, or *"Harvard University, 2024"*) in the paper body and bibliography are 100% preserved.
 - **Layout-Aware Author Block Detection**: Identifies the boundary between paper title and abstract/introduction to isolate author names, affiliations, departments, universities, and contact details on the first page.
 - **First-Page Footnote Sanitizer**: Detects and redacts author correspondence notes, grants, and email footnotes typically positioned at the bottom of Page 1.
-- **Precision Pattern Identification**: Regex-based detection for email addresses and ORCID identifiers across the entire document.
+- **Precision Pattern Identification**: Regex-based detection for email addresses, ORCID identifiers, and GitHub repository links (`github.com/...`) across manuscripts.
+- **Configurable GitHub URL Redaction**: Dedicated toggle (checked by default) to sanitize code repository links that often leak author identities and commit logs.
 - **Destructive PyMuPDF Redaction**: Irreversibly deletes underlying text glyphs and vectors rather than simply drawing an overlay, filling the redacted area with pristine white space without shifting surrounding content.
 - **PDF Metadata Stripping**: Cleans identifying catalog fields (`Author`, `Creator`, `Producer`, `Title`, `CreationDate`, `ModDate`) and removes annotations.
 - **Verification Engine**: Automatically verifies that redacted names and identifiers are no longer extractable or searchable in the generated PDF.

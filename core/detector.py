@@ -46,6 +46,10 @@ FOOTNOTE_CORRESPONDENCE_REGEX = re.compile(
 # Regex patterns for identifiers
 EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b", re.IGNORECASE)
 ORCID_REGEX = re.compile(r"\b(?:https?://orcid\.org/)?(?:orcid:?\s*)?\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b", re.IGNORECASE)
+GITHUB_URL_REGEX = re.compile(
+    r"\b(?:https?://)?(?:www\.)?github\.com/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*[A-Za-z0-9_/-]",
+    re.IGNORECASE,
+)
 ABSTRACT_STOP_REGEX = re.compile(
     r"^\s*(?:abstract|keywords?|index\s+terms?|1\.?\s+introduction|i\.?\s+introduction)\b",
     re.IGNORECASE,
@@ -62,6 +66,7 @@ class PDFDetector:
         detect_first_page_footnotes: bool = True,
         detect_emails: bool = True,
         detect_orcid: bool = True,
+        detect_github_urls: bool = True,
         detect_affiliations_everywhere: bool = False,
         custom_keywords: Optional[List[str]] = None,
     ):
@@ -70,6 +75,7 @@ class PDFDetector:
         self.detect_first_page_footnotes = detect_first_page_footnotes
         self.detect_emails = detect_emails
         self.detect_orcid = detect_orcid
+        self.detect_github_urls = detect_github_urls
         self.detect_affiliations_everywhere = detect_affiliations_everywhere
         self.custom_keywords = [k.strip() for k in (custom_keywords or []) if k.strip()]
 
@@ -110,7 +116,19 @@ class PDFDetector:
                     kw_re = re.compile(kw_pattern, re.IGNORECASE)
                     targets.extend(self._detect_regex_targets(page, page_num, kw_re, "Institution Affiliation", "affiliation"))
 
-        # 4. Custom Keywords: Explicit user instructions, scanned across ALL pages of the document
+        # 4. GitHub Repository URLs (removes code links that deanonymize authors via commit histories)
+        if self.detect_github_urls:
+            pages_for_github = list(range(len(doc))) if not self.scope_to_page1 else [0]
+            # If user checked GitHub URLs, check first page or all pages
+            for page_num in (list(range(len(doc))) if not self.scope_to_page1 else [0]):
+                page = doc[page_num]
+                targets.extend(
+                    self._detect_regex_targets(
+                        page, page_num, GITHUB_URL_REGEX, "GitHub Repository URL", "github"
+                    )
+                )
+
+        # 5. Custom Keywords: Explicit user instructions, scanned across ALL pages of the document
         if self.custom_keywords:
             for page_num in range(len(doc)):
                 page = doc[page_num]

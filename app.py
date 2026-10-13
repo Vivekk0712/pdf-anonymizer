@@ -213,6 +213,12 @@ with st.sidebar:
         help="Locates and removes ORCID identifiers.",
     )
 
+    detect_github = st.checkbox(
+        "Remove GitHub Repository URLs",
+        value=True,
+        help="Removes links to GitHub repositories (e.g. github.com/username/project). Code repositories are a major identity leak in double-blind review.",
+    )
+
     detect_affils_all = st.checkbox(
         "Scan Affiliations on All Pages (Unsafe)",
         value=False,
@@ -360,6 +366,7 @@ current_settings_signature = (
     detect_footnotes,
     detect_emails,
     detect_orcid,
+    detect_github,
     detect_affils_all,
     tuple(custom_keywords),
     strip_meta,
@@ -396,6 +403,7 @@ if process_btn and st.session_state.uploaded_files_data:
         detect_first_page_footnotes=detect_footnotes,
         detect_emails=detect_emails,
         detect_orcid=detect_orcid,
+        detect_github_urls=detect_github,
         detect_affiliations_everywhere=detect_affils_all,
         custom_keywords=custom_keywords,
     )
@@ -501,6 +509,7 @@ if st.session_state.results:
                 <span class="legend-item"><span class="legend-color" style="background:#a855f7;"></span> Page 1 Footnotes</span>
                 <span class="legend-item"><span class="legend-color" style="background:#3b82f6;"></span> Email Addresses</span>
                 <span class="legend-item"><span class="legend-color" style="background:#10b981;"></span> ORCID Identifiers</span>
+                <span class="legend-item"><span class="legend-color" style="background:#8b5cf6;"></span> GitHub URLs</span>
                 <span class="legend-item"><span class="legend-color" style="background:#f59e0b;"></span> Affiliations / Keywords</span>
             </div>
             """,

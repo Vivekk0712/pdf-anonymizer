@@ -60,6 +60,9 @@ class PreviewGenerator:
             elif t.category == "footnote":
                 fill_color = (168, 85, 247, 80)      # Soft purple
                 outline_color = (147, 51, 234, 220)
+            elif t.category == "github":
+                fill_color = (139, 92, 246, 80)      # Soft violet
+                outline_color = (124, 58, 237, 220)
             else:
                 fill_color = (245, 158, 11, 80)      # Soft amber
                 outline_color = (217, 119, 6, 220)

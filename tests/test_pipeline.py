@@ -298,7 +298,35 @@ def test_multi_word_custom_keywords_redaction():
     sanitized_doc.close()
 
 
+def test_github_url_detection_and_toggle():
+    """Validates that GitHub repository URLs are detected when enabled and ignored when disabled."""
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((50, 100), "Paper Title", fontsize=16)
+    page.insert_text((50, 150), "Abstract: We propose a model.", fontsize=12)
+    page.insert_text((50, 200), "Our code is available at https://github.com/alicejohnson/privacy-anon-tool.", fontsize=10)
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    # Case 1: detect_github_urls = True (Default)
+    doc_on = fitz.open(stream=pdf_bytes, filetype="pdf")
+    detector_on = PDFDetector(detect_github_urls=True)
+    targets_on = detector_on.detect_all(doc_on)
+    github_targets = [t for t in targets_on if t.category == "github"]
+    assert len(github_targets) > 0, "GitHub URL must be detected when enabled"
+    assert "github.com/alicejohnson/privacy-anon-tool" in github_targets[0].text
+    doc_on.close()
+
+    # Case 2: detect_github_urls = False (Disabled by user)
+    doc_off = fitz.open(stream=pdf_bytes, filetype="pdf")
+    detector_off = PDFDetector(detect_github_urls=False, custom_keywords=[])
+    targets_off = detector_off.detect_all(doc_off)
+    assert not any(t.category == "github" for t in targets_off), "GitHub URL must not be detected when disabled"
+    doc_off.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
 
 
