@@ -215,7 +215,7 @@ with st.sidebar:
 
     detect_github = st.checkbox(
         "Remove GitHub Repository URLs",
-        value=True,
+        value=False,
         help="Removes links to GitHub repositories (e.g. github.com/username/project). Code repositories are a major identity leak in double-blind review.",
     )
 

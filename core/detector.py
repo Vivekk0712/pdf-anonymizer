@@ -66,7 +66,7 @@ class PDFDetector:
         detect_first_page_footnotes: bool = True,
         detect_emails: bool = True,
         detect_orcid: bool = True,
-        detect_github_urls: bool = True,
+        detect_github_urls: bool = False,
         detect_affiliations_everywhere: bool = False,
         custom_keywords: Optional[List[str]] = None,
     ):
