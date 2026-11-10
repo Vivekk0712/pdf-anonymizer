@@ -1,25 +1,33 @@
-"""Bulk PDF Anonymizer - Streamlit Application
+"""Bulk PDF, Word (.docx) & Plain Text (.txt) Anonymizer - Streamlit Application
 A privacy-focused, layout-preserving tool for removing author identities from research papers.
 """
 
 import io
 import re
+import html
 import streamlit as st
 import pandas as pd
 from PIL import Image
 import fitz  # PyMuPDF
+import docx
 
 from core.detector import PDFDetector, RedactionTarget
 from core.redactor import PDFRedactor, RedactionResult
 from core.preview import PreviewGenerator
 from core.exporter import BatchExporter
-from core.importer import extract_pdfs_from_zip
-from tests.test_pipeline import create_synthetic_research_paper
+from core.importer import extract_documents_from_zip, extract_pdfs_from_zip
+from core.docx_handler import DOCXDetector, DOCXRedactor
+from core.txt_handler import TXTDetector, TXTRedactor
+from tests.test_pipeline import (
+    create_synthetic_research_paper,
+    create_synthetic_docx_paper,
+    create_synthetic_txt_paper,
+)
 
 
 # Configure Page
 st.set_page_config(
-    page_title="PDF Anonymizer | Double-Blind Review Sanitizer",
+    page_title="PDF & Document Anonymizer | Double-Blind Review Sanitizer",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -118,13 +126,6 @@ st.markdown(
         letter-spacing: 0.04em;
     }
 
-    .preview-box {
-        border-radius: 12px;
-        border: 1px solid #cbd5e1;
-        padding: 0.75rem;
-        background: #f8fafc;
-    }
-
     .legend-item {
         display: inline-flex;
         align-items: center;
@@ -141,18 +142,48 @@ st.markdown(
         margin-right: 0.4rem;
         display: inline-block;
     }
-
-    .status-pill {
-        display: inline-block;
-        padding: 0.2rem 0.6rem;
-        border-radius: 6px;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+
+def highlight_text_targets(raw_text: str, targets: List[RedactionTarget]) -> str:
+    """Escapes raw text and highlights detected targets for web preview."""
+    escaped = html.escape(raw_text)
+    # Target strings sorted by length descending to prevent substring collisions
+    target_strings = sorted(list({t.text.strip() for t in targets if t.text.strip()}), key=len, reverse=True)
+    for ts in target_strings:
+        if len(ts) < 2:
+            continue
+        ts_escaped = html.escape(ts)
+        escaped = re.sub(
+            re.escape(ts_escaped),
+            r"<mark style='background-color: #fecaca; color: #991b1b; padding: 2px 4px; border-radius: 4px; font-weight: 600;'>\g<0></mark>",
+            escaped,
+            flags=re.IGNORECASE,
+        )
+    return escaped
+
+
+def get_format_label(filename: str) -> str:
+    lower = filename.lower()
+    if lower.endswith(".pdf"):
+        return "PDF Manuscript"
+    elif lower.endswith(".docx"):
+        return "Word Document (.docx)"
+    elif lower.endswith(".txt"):
+        return "Plain Text (.txt)"
+    return "Document"
+
+
+def get_file_download_meta(filename: str):
+    lower = filename.lower()
+    if lower.endswith(".docx"):
+        return "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "⬇️ Download DOCX"
+    elif lower.endswith(".txt"):
+        return "text/plain", "⬇️ Download TXT"
+    return "application/pdf", "⬇️ Download PDF"
 
 
 def initialize_session_state():
@@ -171,21 +202,49 @@ initialize_session_state()
 with st.sidebar:
     st.markdown("### ⚙️ Sanitization Settings")
     st.markdown(
-        "<span style='font-size: 0.85rem; color: #64748b;'>Configure detection rules and redaction depth.</span>",
+        "<span style='font-size: 0.85rem; color: #64748b;'>Configure supported formats, detection rules, and redaction depth.</span>",
         unsafe_allow_html=True,
     )
     st.markdown("---")
 
+    st.markdown("#### **Supported Formats**")
+    enable_pdf = st.checkbox(
+        "PDF Documents (.pdf)",
+        value=True,
+        help="Full layout-preserving destructive vector redaction for PDF research papers.",
+    )
+    enable_docx = st.checkbox(
+        "Word Documents (.docx)",
+        value=True,
+        help="Sanitize Microsoft Word research manuscripts, author paragraphs, and strip document properties.",
+    )
+    enable_txt = st.checkbox(
+        "Plain Text Documents (.txt)",
+        value=True,
+        help="Sanitize plain text research papers and preambles before Abstract.",
+    )
+
+    allowed_extensions = set()
+    if enable_pdf:
+        allowed_extensions.add("pdf")
+    if enable_docx:
+        allowed_extensions.add("docx")
+    if enable_txt:
+        allowed_extensions.add("txt")
+
+    uploader_types = list(allowed_extensions) + ["zip"] if allowed_extensions else ["zip"]
+
+    st.markdown("---")
     st.markdown("#### **Scope & Targeting**")
     scope_page1 = st.checkbox(
         "Scope Redactions to Page 1 Only (Recommended)",
         value=True,
-        help="Restricts redaction strictly to the first page. Preserves legitimate citations, dataset names, and institutional mentions on Pages 2+.",
+        help="Restricts redaction strictly to the first page (or preamble before Abstract for TXT). Preserves legitimate citations, dataset names, and institutional mentions on later pages.",
     )
 
     if scope_page1:
         st.caption(
-            "🔒 **Safe Mode Active**: Only Page 1 is modified. University names in citations, references, and datasets (e.g. *'Stanford Dogs Dataset'*) on Pages 2+ remain intact."
+            "🔒 **Safe Mode Active**: Only Page 1 / Preamble is modified. University names in citations, references, and datasets (e.g. *'Stanford Dogs Dataset'*) remain intact."
         )
 
     st.markdown("#### **Detection Rules**")
@@ -246,15 +305,15 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("#### **Document Sanitization**")
     strip_meta = st.checkbox(
-        "Scrub PDF Document Metadata",
+        "Scrub Document Metadata",
         value=True,
-        help="Clears 'Author', 'Creator', 'Producer', 'Title', and modification timestamps from PDF catalog.",
+        help="Clears 'Author', 'Creator', 'Producer', 'Title', and modification timestamps from PDF catalog & Word core properties.",
     )
 
     remove_annots = st.checkbox(
         "Clear Annotations & Comments",
         value=True,
-        help="Deletes any author annotations, sticky notes, or highlight markings in the PDF.",
+        help="Deletes author annotations, sticky notes, or comment tracks in PDF and Word manuscripts.",
     )
 
     preview_dpi = st.slider(
@@ -268,12 +327,13 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### **Quick Actions**")
-    if st.button("🧪 Load Sample Research Paper", use_container_width=True):
-        sample_pdf_bytes = create_synthetic_research_paper()
-        st.session_state.uploaded_files_data["sample_paper_ieee.pdf"] = sample_pdf_bytes
+    if st.button("🧪 Load Sample Papers (PDF, DOCX, TXT)", use_container_width=True):
+        st.session_state.uploaded_files_data["sample_paper_ieee.pdf"] = create_synthetic_research_paper()
+        st.session_state.uploaded_files_data["sample_paper_nlp.docx"] = create_synthetic_docx_paper()
+        st.session_state.uploaded_files_data["sample_paper_preamble.txt"] = create_synthetic_txt_paper()
         st.session_state.results = []
         st.session_state.preview_cache = {}
-        st.toast("Loaded synthetic IEEE sample paper!", icon="📄")
+        st.toast("Loaded sample PDF, Word (.docx), and Plain Text (.txt) papers!", icon="📄")
         st.rerun()
 
     if st.session_state.uploaded_files_data:
@@ -289,13 +349,13 @@ with st.sidebar:
 st.markdown(
     """
     <div class="main-header">
-        <h1>Bulk Research Paper Anonymizer</h1>
-        <p>Automated double-blind peer review preparation. Irreversibly strips author blocks, affiliations, emails, and PDF metadata while preserving exact typography and page layout.</p>
+        <h1>Multi-Format Research Paper Anonymizer</h1>
+        <p>Automated double-blind peer review preparation. Irreversibly strips author blocks, affiliations, emails, and document metadata from PDF, Word (.docx), and Plain Text (.txt) manuscripts.</p>
         <div class="badge-container">
             <span class="badge"><span class="badge-dot"></span> 100% Local Processing (Private & Offline)</span>
-            <span class="badge"><span class="badge-dot"></span> Bulk PDFs & ZIP Archives Supported</span>
-            <span class="badge"><span class="badge-dot"></span> True PyMuPDF Destructive Redaction</span>
-            <span class="badge"><span class="badge-dot"></span> Layout & Coordinate Preserving</span>
+            <span class="badge"><span class="badge-dot"></span> PDF, Word (.docx) & Plain Text (.txt) Supported</span>
+            <span class="badge"><span class="badge-dot"></span> Bulk Direct & ZIP Archives Supported</span>
+            <span class="badge"><span class="badge-dot"></span> True Destructive Redaction</span>
             <span class="badge"><span class="badge-dot"></span> Double-Blind Review Ready</span>
         </div>
     </div>
@@ -305,10 +365,10 @@ st.markdown(
 
 # ----------------- UPLOAD ZONE -----------------
 uploaded_files = st.file_uploader(
-    "Upload PDFs or ZIP Archive in bulk",
-    type=["pdf", "zip"],
+    "Upload Research Papers or ZIP Archive in bulk",
+    type=uploader_types,
     accept_multiple_files=True,
-    help="Upload individual PDF research papers or a ZIP archive containing multiple PDFs. Nested folders are automatically unbundled.",
+    help="Upload individual PDF, Word (.docx), Plain Text (.txt) papers, or a ZIP archive containing any combination. Nested folders are automatically unbundled.",
 )
 
 # Store newly uploaded files into session state
@@ -319,23 +379,25 @@ if uploaded_files:
         fbytes = f.read()
 
         if fname.lower().endswith(".zip"):
-            extracted_dict, skipped_list = extract_pdfs_from_zip(fbytes)
-            for pdf_name, pdf_data in extracted_dict.items():
-                if pdf_name not in st.session_state.uploaded_files_data:
-                    st.session_state.uploaded_files_data[pdf_name] = pdf_data
+            extracted_dict, skipped_list = extract_documents_from_zip(fbytes, allowed_extensions=allowed_extensions)
+            for doc_name, doc_data in extracted_dict.items():
+                if doc_name not in st.session_state.uploaded_files_data:
+                    st.session_state.uploaded_files_data[doc_name] = doc_data
                     newly_added += 1
 
             if extracted_dict:
-                st.toast(f"📦 Unpacked {len(extracted_dict)} PDFs from {fname}!", icon="🎉")
+                st.toast(f"📦 Unpacked {len(extracted_dict)} documents from {fname}!", icon="🎉")
             if skipped_list:
                 st.warning(
                     f"⚠️ {len(skipped_list)} item(s) skipped in {fname}: {', '.join(skipped_list[:3])}"
                 )
 
-        elif fname.lower().endswith(".pdf"):
-            if fname not in st.session_state.uploaded_files_data:
-                st.session_state.uploaded_files_data[fname] = fbytes
-                newly_added += 1
+        else:
+            file_ext = fname.lower().split(".")[-1]
+            if file_ext in allowed_extensions:
+                if fname not in st.session_state.uploaded_files_data:
+                    st.session_state.uploaded_files_data[fname] = fbytes
+                    newly_added += 1
 
     if newly_added > 0:
         st.session_state.results = []
@@ -352,7 +414,7 @@ if st.session_state.uploaded_files_data:
                 {
                     "Document Name": name,
                     "File Size": f"{round(len(data) / 1024, 1)} KB",
-                    "Format": "PDF Manuscript",
+                    "Format": get_format_label(name),
                 }
                 for name, data in st.session_state.uploaded_files_data.items()
             ]
@@ -361,6 +423,9 @@ if st.session_state.uploaded_files_data:
 
 # Track settings signature
 current_settings_signature = (
+    enable_pdf,
+    enable_docx,
+    enable_txt,
     scope_page1,
     detect_page1,
     detect_footnotes,
@@ -397,7 +462,7 @@ with col_action2:
 
 # ----------------- PROCESSING PIPELINE -----------------
 if process_btn and st.session_state.uploaded_files_data:
-    detector = PDFDetector(
+    pdf_detector = PDFDetector(
         scope_to_page1=scope_page1,
         detect_first_page_author_block=detect_page1,
         detect_first_page_footnotes=detect_footnotes,
@@ -407,28 +472,67 @@ if process_btn and st.session_state.uploaded_files_data:
         detect_affiliations_everywhere=detect_affils_all,
         custom_keywords=custom_keywords,
     )
-    redactor = PDFRedactor(
+    pdf_redactor = PDFRedactor(
         strip_metadata=strip_meta,
         remove_annotations=remove_annots,
         fill_color=(1.0, 1.0, 1.0),
     )
 
+    docx_detector = DOCXDetector(
+        scope_to_page1=scope_page1,
+        detect_first_page_author_block=detect_page1,
+        detect_first_page_footnotes=detect_footnotes,
+        detect_emails=detect_emails,
+        detect_orcid=detect_orcid,
+        detect_github_urls=detect_github,
+        detect_affiliations_everywhere=detect_affils_all,
+        custom_keywords=custom_keywords,
+    )
+    docx_redactor = DOCXRedactor(strip_metadata=strip_meta)
+
+    txt_detector = TXTDetector(
+        scope_to_page1=scope_page1,
+        detect_first_page_author_block=detect_page1,
+        detect_first_page_footnotes=detect_footnotes,
+        detect_emails=detect_emails,
+        detect_orcid=detect_orcid,
+        detect_github_urls=detect_github,
+        detect_affiliations_everywhere=detect_affils_all,
+        custom_keywords=custom_keywords,
+    )
+    txt_redactor = TXTRedactor(strip_metadata=strip_meta)
+
     results: list[RedactionResult] = []
-    progress_bar = st.progress(0, text="Initializing PDF batch processing...")
+    progress_bar = st.progress(0, text="Initializing batch document processing...")
 
     total_files = len(st.session_state.uploaded_files_data)
-    for idx, (filename, pdf_bytes) in enumerate(st.session_state.uploaded_files_data.items()):
+    for idx, (filename, file_bytes) in enumerate(st.session_state.uploaded_files_data.items()):
         progress_bar.progress(
             (idx) / total_files,
             text=f"Sanitizing ({idx + 1}/{total_files}): {filename}...",
         )
 
+        lower_name = filename.lower()
         try:
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            targets = detector.detect_all(doc)
-            result = redactor.redact_document(doc, targets, filename=filename)
-            results.append(result)
-            doc.close()
+            if lower_name.endswith(".pdf"):
+                doc = fitz.open(stream=file_bytes, filetype="pdf")
+                targets = pdf_detector.detect_all(doc)
+                result = pdf_redactor.redact_document(doc, targets, filename=filename)
+                results.append(result)
+                doc.close()
+            elif lower_name.endswith(".docx"):
+                doc = docx.Document(io.BytesIO(file_bytes))
+                targets = docx_detector.detect_all(doc)
+                result = docx_redactor.redact_document(file_bytes, targets, filename=filename)
+                results.append(result)
+            elif lower_name.endswith(".txt"):
+                try:
+                    raw_text = file_bytes.decode("utf-8")
+                except UnicodeDecodeError:
+                    raw_text = file_bytes.decode("latin-1")
+                targets = txt_detector.detect_all(raw_text)
+                result = txt_redactor.redact_document(file_bytes, targets, filename=filename)
+                results.append(result)
         except Exception as e:
             st.error(f"Error processing {filename}: {str(e)}")
 
@@ -496,12 +600,12 @@ if st.session_state.results:
 
     # Tabs for Inspection, Audit Log, and Downloads
     tab_preview, tab_audit, tab_download = st.tabs(
-        ["🔍 Side-by-Side Visual Preview", "📋 Audit & Processing Log", "📦 Download Station"]
+        ["🔍 Side-by-Side Visual & Text Preview", "📋 Audit & Processing Log", "📦 Download Station"]
     )
 
     # --- TAB 1: VISUAL PREVIEW ---
     with tab_preview:
-        st.markdown("#### Side-by-Side Visual Comparison")
+        st.markdown("#### Side-by-Side Comparison")
         st.markdown(
             """
             <div style="margin-bottom: 1rem;">
@@ -517,51 +621,68 @@ if st.session_state.results:
         )
 
         doc_names = [r.filename for r in st.session_state.results]
-        col_select1, col_select2 = st.columns([3, 1])
-        with col_select1:
-            selected_file = st.selectbox("Select document to inspect:", doc_names, index=0)
+        selected_file = st.selectbox("Select document to inspect:", doc_names, index=0)
 
         # Get result for chosen file
         selected_res = next(r for r in st.session_state.results if r.filename == selected_file)
         orig_bytes = st.session_state.uploaded_files_data[selected_file]
+        targets_for_file = [
+            RedactionTarget(
+                page_num=item["page_num"],
+                bbox=tuple(item["bbox"]),
+                text=item["text"],
+                reason=item["reason"],
+                category=item["category"],
+            )
+            for item in selected_res.redacted_items
+        ]
 
-        with col_select2:
+        if selected_res.file_type == "pdf":
+            # PDF Rendered Page Preview
             max_pages = max(1, selected_res.original_page_count)
             page_idx = st.number_input("Page #", min_value=1, max_value=max_pages, value=1, step=1) - 1
 
-        # Check cache or render
-        cache_key = f"{selected_file}_{page_idx}_{preview_dpi}"
-        if cache_key not in st.session_state.preview_cache:
-            with st.spinner("Rendering high-resolution page comparison..."):
-                preview_gen = PreviewGenerator(dpi=preview_dpi)
-                targets_for_file = [
-                    RedactionTarget(
-                        page_num=item["page_num"],
-                        bbox=tuple(item["bbox"]),
-                        text=item["text"],
-                        reason=item["reason"],
-                        category=item["category"],
+            cache_key = f"{selected_file}_{page_idx}_{preview_dpi}"
+            if cache_key not in st.session_state.preview_cache:
+                with st.spinner("Rendering high-resolution page comparison..."):
+                    preview_gen = PreviewGenerator(dpi=preview_dpi)
+                    overlay_img, clean_img = preview_gen.generate_side_by_side_previews(
+                        orig_bytes,
+                        targets_for_file,
+                        selected_res.output_pdf_bytes,
+                        page_num=page_idx,
                     )
-                    for item in selected_res.redacted_items
-                ]
-                overlay_img, clean_img = preview_gen.generate_side_by_side_previews(
-                    orig_bytes,
-                    targets_for_file,
-                    selected_res.output_pdf_bytes,
-                    page_num=page_idx,
+                    st.session_state.preview_cache[cache_key] = (overlay_img, clean_img)
+
+            overlay_img, clean_img = st.session_state.preview_cache[cache_key]
+
+            col_orig, col_clean = st.columns(2)
+            with col_orig:
+                st.markdown("##### 🔴 Original PDF (Detected Redaction Boundaries)")
+                st.image(overlay_img, use_container_width=True)
+
+            with col_clean:
+                st.markdown("##### ⚪ Anonymized PDF (Destructive Whitespace Fill)")
+                st.image(clean_img, use_container_width=True)
+
+        else:
+            # Word (.docx) or Plain Text (.txt) Side-by-Side Text Comparison
+            col_orig, col_clean = st.columns(2)
+            with col_orig:
+                st.markdown(f"##### 🔴 Original {selected_res.file_type.upper()} (Detected Redactions Highlighted)")
+                highlighted_html = highlight_text_targets(selected_res.original_text or "", targets_for_file)
+                st.markdown(
+                    f'<div style="max-height: 550px; overflow-y: auto; background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e1; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.5; color: #1e293b;">{highlighted_html}</div>',
+                    unsafe_allow_html=True,
                 )
-                st.session_state.preview_cache[cache_key] = (overlay_img, clean_img)
 
-        overlay_img, clean_img = st.session_state.preview_cache[cache_key]
-
-        col_orig, col_clean = st.columns(2)
-        with col_orig:
-            st.markdown("##### 🔴 Original (Detected Redaction Boundaries)")
-            st.image(overlay_img, use_container_width=True)
-
-        with col_clean:
-            st.markdown("##### ⚪ Anonymized (Destructive Whitespace Fill)")
-            st.image(clean_img, use_container_width=True)
+            with col_clean:
+                st.markdown(f"##### ⚪ Anonymized {selected_res.file_type.upper()} (Sanitized Output)")
+                sanitized_escaped = html.escape(selected_res.sanitized_text or "")
+                st.markdown(
+                    f'<div style="max-height: 550px; overflow-y: auto; background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e1; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.5; color: #1e293b;">{sanitized_escaped}</div>',
+                    unsafe_allow_html=True,
+                )
 
     # --- TAB 2: AUDIT & PROCESSING LOG ---
     with tab_audit:
@@ -576,11 +697,10 @@ if st.session_state.results:
                     detail_df = pd.DataFrame(
                         [
                             {
-                                "Page": item["page_num"] + 1,
+                                "Page/Section": item["page_num"] + 1,
                                 "Category": item["category"].replace("_", " ").title(),
                                 "Reason": item["reason"],
                                 "Identified Text": item["text"],
-                                "Coordinates (x0, y0, x1, y1)": f"({item['bbox'][0]:.1f}, {item['bbox'][1]:.1f}, {item['bbox'][2]:.1f}, {item['bbox'][3]:.1f})",
                             }
                             for item in res.redacted_items
                         ]
@@ -597,7 +717,7 @@ if st.session_state.results:
         zip_bytes = BatchExporter.create_zip_archive(st.session_state.results, include_audit_report=True)
 
         st.download_button(
-            label="📦 Download All Anonymized PDFs + Audit Report (.zip)",
+            label="📦 Download All Anonymized Documents + Audit Report (.zip)",
             data=zip_bytes,
             file_name="anonymized_research_papers.zip",
             mime="application/zip",
@@ -613,18 +733,19 @@ if st.session_state.results:
             with d_col1:
                 st.markdown(
                     f"**`anonymized_{res.filename}`** &nbsp;·&nbsp; "
-                    f"<span style='color: #64748b; font-size: 0.85rem;'>{res.targets_count} redactions applied · {len(res.output_pdf_bytes) // 1024} KB</span>",
+                    f"<span style='color: #64748b; font-size: 0.85rem;'>{get_format_label(res.filename)} · {res.targets_count} redactions applied · {len(res.output_pdf_bytes) // 1024} KB</span>",
                     unsafe_allow_html=True,
                 )
             with d_col2:
+                mime_type, btn_label = get_file_download_meta(res.filename)
                 st.download_button(
-                    label=f"⬇️ Download PDF",
+                    label=btn_label,
                     data=res.output_pdf_bytes,
                     file_name=f"anonymized_{res.filename}",
-                    mime="application/pdf",
+                    mime=mime_type,
                     key=f"dl_{res.filename}",
                     use_container_width=True,
                 )
 
 elif not st.session_state.uploaded_files_data:
-    st.info("👆 Upload research paper PDFs above, or click **Load Sample Research Paper** in the sidebar to test.")
+    st.info("👆 Upload research paper PDFs, Word (.docx), or Plain Text (.txt) above, or click **Load Sample Papers** in the sidebar to test.")

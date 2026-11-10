@@ -34,6 +34,7 @@ class BatchExporter:
                 detailed_records = [
                     {
                         "filename": r.filename,
+                        "format": getattr(r, "file_type", "pdf"),
                         "pages": r.original_page_count,
                         "redactions_count": r.targets_count,
                         "verified_clean": r.is_verified_clean,

@@ -1,23 +1,32 @@
-"""Module for importing and unbundling bulk PDFs and ZIP archives."""
+"""Module for importing and unbundling bulk PDFs, Word (.docx), TXT files, and ZIP archives."""
 
 import io
 import os
 import zipfile
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
 import fitz  # PyMuPDF
+import docx  # python-docx
+
+DEFAULT_ALLOWED_EXTENSIONS = {"pdf", "docx", "txt"}
 
 
-def extract_pdfs_from_zip(
-    zip_source: Union[bytes, io.BytesIO]
+def extract_documents_from_zip(
+    zip_source: Union[bytes, io.BytesIO],
+    allowed_extensions: Optional[Set[str]] = None,
 ) -> Tuple[Dict[str, bytes], List[str]]:
-    """Extracts and validates all PDF files from a ZIP archive.
+    """Extracts and validates document files (PDF, DOCX, TXT) from a ZIP archive.
     
     Handles nested directory structures, eliminates macOS metadata artifacts,
-    resolves filename collisions, and verifies PDF file integrity.
+    resolves filename collisions, and validates file integrity.
     
     Returns:
-        Tuple of (extracted_pdfs_dict {filename: bytes}, skipped_or_warning_list)
+        Tuple of (extracted_docs_dict {filename: bytes}, skipped_or_warning_list)
     """
+    if allowed_extensions is None:
+        allowed_extensions = DEFAULT_ALLOWED_EXTENSIONS
+    else:
+        allowed_extensions = {ext.lower().lstrip(".") for ext in allowed_extensions}
+
     if isinstance(zip_source, bytes):
         zip_buffer = io.BytesIO(zip_source)
     else:
@@ -39,28 +48,38 @@ def extract_pdfs_from_zip(
                 if any(p.startswith("__MACOSX") or p.startswith(".") for p in parts):
                     continue
 
-                # Only process PDF files
-                if not raw_filename.lower().endswith(".pdf"):
+                ext = os.path.splitext(raw_filename)[1].lower().lstrip(".")
+                if ext not in allowed_extensions:
                     continue
 
                 try:
-                    pdf_bytes = zf.read(info)
-                    if len(pdf_bytes) == 0:
+                    file_bytes = zf.read(info)
+                    if len(file_bytes) == 0:
                         skipped.append(f"{raw_filename} (empty file)")
                         continue
 
-                    # Validate PDF stream integrity with PyMuPDF
-                    test_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                    if test_doc.is_encrypted:
+                    # Validate integrity based on file type
+                    if ext == "pdf":
+                        test_doc = fitz.open(stream=file_bytes, filetype="pdf")
+                        if test_doc.is_encrypted:
+                            test_doc.close()
+                            skipped.append(f"{raw_filename} (password encrypted PDF)")
+                            continue
                         test_doc.close()
-                        skipped.append(f"{raw_filename} (password encrypted PDF)")
-                        continue
-                    test_doc.close()
+                    elif ext == "docx":
+                        # Validate Word document structure
+                        _ = docx.Document(io.BytesIO(file_bytes))
+                    elif ext == "txt":
+                        # Validate text decoding
+                        try:
+                            _ = file_bytes.decode("utf-8")
+                        except UnicodeDecodeError:
+                            _ = file_bytes.decode("latin-1")
 
                     # Determine clean unique filename
                     base_name = os.path.basename(raw_filename)
                     if not base_name:
-                        base_name = "document.pdf"
+                        base_name = f"document.{ext}"
 
                     candidate_name = base_name
                     # If duplicate base name across folders, incorporate folder name
@@ -71,12 +90,12 @@ def extract_pdfs_from_zip(
 
                     # If still duplicate, add incremental suffix
                     counter = 1
-                    stem, ext = os.path.splitext(candidate_name)
+                    stem, orig_ext = os.path.splitext(candidate_name)
                     while candidate_name in extracted:
-                        candidate_name = f"{stem}_{counter}{ext}"
+                        candidate_name = f"{stem}_{counter}{orig_ext}"
                         counter += 1
 
-                    extracted[candidate_name] = pdf_bytes
+                    extracted[candidate_name] = file_bytes
 
                 except Exception as ex:
                     skipped.append(f"{raw_filename} (corrupted: {str(ex)})")
@@ -85,3 +104,10 @@ def extract_pdfs_from_zip(
         skipped.append("Uploaded file is not a valid or readable ZIP archive.")
 
     return extracted, skipped
+
+
+def extract_pdfs_from_zip(
+    zip_source: Union[bytes, io.BytesIO]
+) -> Tuple[Dict[str, bytes], List[str]]:
+    """Backward-compatible extraction for PDF-only archives."""
+    return extract_documents_from_zip(zip_source, allowed_extensions={"pdf"})

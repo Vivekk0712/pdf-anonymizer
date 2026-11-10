@@ -8,7 +8,10 @@ from core.detector import PDFDetector
 from core.redactor import PDFRedactor
 from core.preview import PreviewGenerator
 from core.exporter import BatchExporter
-from core.importer import extract_pdfs_from_zip
+from core.importer import extract_pdfs_from_zip, extract_documents_from_zip
+from core.docx_handler import DOCXDetector, DOCXRedactor
+from core.txt_handler import TXTDetector, TXTRedactor
+import docx
 
 
 def create_synthetic_research_paper() -> bytes:
@@ -109,6 +112,41 @@ def create_synthetic_research_paper() -> bytes:
     pdf_bytes = doc.tobytes()
     doc.close()
     return pdf_bytes
+
+
+def create_synthetic_docx_paper() -> bytes:
+    """Creates a sample Word research paper with author block, affiliations, emails, and abstract."""
+    doc = docx.Document()
+    doc.add_heading("Deep Learning for Autonomous Vehicles", 0)
+    doc.add_paragraph("Dr. Alice Johnson and Prof. Bob Smith")
+    doc.add_paragraph("Department of Computer Science, University of California, Berkeley")
+    doc.add_paragraph("Emails: alice@berkeley.edu, bob@berkeley.edu | ORCID: 0000-0002-1825-0097")
+    doc.add_heading("Abstract", level=1)
+    doc.add_paragraph("Autonomous vehicles require perception. We benchmark on the Stanford Dogs dataset and cite Harvard University.")
+    doc.add_heading("1. Introduction", level=1)
+    doc.add_paragraph("Prior work at MIT demonstrated foundational models. Contact dataset@mit.edu for details.")
+    doc.core_properties.author = "Dr. Alice Johnson"
+    doc.core_properties.last_modified_by = "Prof. Bob Smith"
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def create_synthetic_txt_paper() -> bytes:
+    """Creates a sample Plain Text research paper with title, author preamble, abstract, and citations."""
+    sample = (
+        "Deep Learning for Autonomous Vehicles\n\n"
+        "Dr. Alice Johnson and Prof. Bob Smith\n"
+        "Department of Computer Science, University of California, Berkeley\n"
+        "Emails: alice@berkeley.edu, bob@berkeley.edu | ORCID: 0000-0002-1825-0097\n"
+        "Repository: https://github.com/alicejohnson/autonomous-pilot\n\n"
+        "Abstract\n"
+        "Autonomous vehicles require perception. We benchmark on the Stanford Dogs dataset and cite Harvard University.\n\n"
+        "1. Introduction\n"
+        "Prior work at MIT demonstrated foundational models. Contact dataset@mit.edu for details.\n"
+    )
+    return sample.encode("utf-8")
 
 
 def test_detector_finds_page1_author_block_and_footnote():
@@ -323,6 +361,93 @@ def test_github_url_detection_and_toggle():
     targets_off = detector_off.detect_all(doc_off)
     assert not any(t.category == "github" for t in targets_off), "GitHub URL must not be detected when disabled"
     doc_off.close()
+
+
+def test_docx_redactor_and_metadata_sanitization():
+    """Validates Word (.docx) author block redaction, metadata scrubbing, and citation preservation."""
+    docx_bytes = create_synthetic_docx_paper()
+    doc = docx.Document(io.BytesIO(docx_bytes))
+
+    # Verify original author is set
+    assert doc.core_properties.author == "Dr. Alice Johnson"
+
+    detector = DOCXDetector(scope_to_page1=True)
+    targets = detector.detect_all(doc)
+    assert len(targets) > 0, "DOCXDetector should identify author and email targets"
+
+    redactor = DOCXRedactor(strip_metadata=True)
+    res = redactor.redact_document(docx_bytes, targets, filename="paper.docx")
+
+    assert res.targets_count > 0
+    assert res.metadata_stripped is True
+    assert res.is_verified_clean is True
+
+    # Re-open sanitized docx and verify
+    clean_doc = docx.Document(io.BytesIO(res.output_pdf_bytes))
+    clean_full_text = " ".join(p.text for p in clean_doc.paragraphs)
+
+    # Authors and emails must be removed
+    assert "Alice Johnson" not in clean_full_text
+    assert "alice@berkeley.edu" not in clean_full_text
+    # Citations in abstract/body must be preserved
+    assert "Deep Learning for Autonomous Vehicles" in clean_full_text, "Title must remain"
+    assert "Stanford Dogs" in clean_full_text, "Stanford Dogs dataset citation must remain"
+    assert "Harvard University" in clean_full_text, "Harvard University citation must remain"
+    assert "MIT" in clean_full_text, "MIT reference must remain"
+
+    # Verify metadata is stripped
+    assert clean_doc.core_properties.author in ("", None)
+    assert clean_doc.core_properties.last_modified_by in ("", None)
+
+
+def test_txt_redactor_and_preamble_sanitization():
+    """Validates Plain Text (.txt) preamble redaction, abstract & citation preservation."""
+    txt_bytes = create_synthetic_txt_paper()
+    raw_text = txt_bytes.decode("utf-8")
+
+    detector = TXTDetector(scope_to_page1=True, detect_github_urls=True)
+    targets = detector.detect_all(raw_text)
+    assert len(targets) > 0, "TXTDetector should identify author preamble targets"
+
+    redactor = TXTRedactor(strip_metadata=True)
+    res = redactor.redact_document(txt_bytes, targets, filename="paper.txt")
+
+    assert res.targets_count > 0
+    assert res.is_verified_clean is True
+
+    clean_text = res.output_pdf_bytes.decode("utf-8")
+
+    # Author details must be redacted
+    assert "Alice Johnson" not in clean_text
+    assert "alice@berkeley.edu" not in clean_text
+    assert "github.com/alicejohnson" not in clean_text
+
+    # Abstract, Title, Citations must be preserved
+    assert "Deep Learning for Autonomous Vehicles" in clean_text, "Title must remain"
+    assert "Abstract" in clean_text, "Abstract header must remain"
+    assert "Stanford Dogs" in clean_text, "Stanford Dogs dataset citation must remain"
+    assert "Harvard University" in clean_text, "Harvard University citation must remain"
+    assert "dataset@mit.edu" in clean_text, "Citation email in body must remain when scoped to Page 1"
+
+
+def test_extract_multi_format_documents_from_zip():
+    """Validates unbundling PDF, DOCX, and TXT files from a single ZIP archive."""
+    pdf_data = create_synthetic_research_paper()
+    docx_data = create_synthetic_docx_paper()
+    txt_data = create_synthetic_txt_paper()
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("papers/paper1.pdf", pdf_data)
+        zf.writestr("papers/paper2.docx", docx_data)
+        zf.writestr("papers/paper3.txt", txt_data)
+        zf.writestr("notes.log", "some log")  # Should be skipped
+
+    extracted, skipped = extract_documents_from_zip(zip_buf.getvalue())
+    assert len(extracted) == 3, f"Expected 3 extracted documents, got {len(extracted)}"
+    assert any(k.endswith(".pdf") for k in extracted.keys())
+    assert any(k.endswith(".docx") for k in extracted.keys())
+    assert any(k.endswith(".txt") for k in extracted.keys())
 
 
 if __name__ == "__main__":

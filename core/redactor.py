@@ -15,10 +15,19 @@ class RedactionResult:
     metadata_stripped: bool
     is_verified_clean: bool
     output_pdf_bytes: bytes
+    file_type: str = "pdf"  # 'pdf', 'docx', 'txt'
+    original_text: Optional[str] = None
+    sanitized_text: Optional[str] = None
+
+    @property
+    def output_bytes(self) -> bytes:
+        """Alias for output_pdf_bytes for multi-format compatibility."""
+        return self.output_pdf_bytes
 
     def to_summary_dict(self) -> Dict[str, Any]:
         return {
             "Filename": self.filename,
+            "Format": getattr(self, "file_type", "pdf").upper(),
             "Pages": self.original_page_count,
             "Redactions Applied": self.targets_count,
             "Metadata Stripped": "Yes" if self.metadata_stripped else "No",
