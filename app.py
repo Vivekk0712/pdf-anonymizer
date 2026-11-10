@@ -5,6 +5,9 @@ A privacy-focused, layout-preserving tool for removing author identities from re
 import io
 import re
 import html
+import base64
+import difflib
+from typing import List, Dict, Any, Optional
 import streamlit as st
 import pandas as pd
 from PIL import Image
@@ -164,6 +167,40 @@ def highlight_text_targets(raw_text: str, targets: List[RedactionTarget]) -> str
             flags=re.IGNORECASE,
         )
     return escaped
+
+
+def pil_to_base64_png(img: Image.Image) -> str:
+    """Converts a PIL Image to a Base64-encoded PNG data string."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def generate_html_diff(orig_text: str, anon_text: str) -> str:
+    """Generates an HTML unified line diff highlighting deletions and preserved lines."""
+    orig_lines = (orig_text or "").splitlines()
+    anon_lines = (anon_text or "").splitlines()
+    diff = list(difflib.ndiff(orig_lines, anon_lines))
+
+    html_lines = []
+    for line in diff:
+        if line.startswith("- "):
+            content = html.escape(line[2:])
+            html_lines.append(
+                f"<div style='background-color: #fee2e2; color: #991b1b; padding: 3px 8px; border-left: 3px solid #ef4444; margin: 2px 0; border-radius: 2px;'><strong>- </strong>{content}</div>"
+            )
+        elif line.startswith("+ "):
+            content = html.escape(line[2:])
+            html_lines.append(
+                f"<div style='background-color: #dcfce7; color: #166534; padding: 3px 8px; border-left: 3px solid #22c55e; margin: 2px 0; border-radius: 2px;'><strong>+ </strong>{content}</div>"
+            )
+        elif line.startswith("? "):
+            continue
+        else:
+            content = html.escape(line[2:])
+            html_lines.append(f"<div style='color: #475569; padding: 2px 8px;'>&nbsp;&nbsp;{content}</div>")
+
+    return "".join(html_lines)
 
 
 def get_format_label(filename: str) -> str:
@@ -640,7 +677,56 @@ if st.session_state.results:
         if selected_res.file_type == "pdf":
             # PDF Rendered Page Preview
             max_pages = max(1, selected_res.original_page_count)
-            page_idx = st.number_input("Page #", min_value=1, max_value=max_pages, value=1, step=1) - 1
+
+            # Interactive View & Zoom Toolbar for PDF
+            st.markdown(
+                """
+                <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px;">
+                    <span style="font-weight: 600; font-size: 0.9rem; color: #1e293b;">🔍 PDF Inspection & Zoom Toolbar</span>
+                    <span style="font-size: 0.8rem; color: #64748b; margin-left: 8px;">Adjust zoom level, container height, or switch between side-by-side and full-width stacked view.</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            p_col1, p_col2, p_col3, p_col4 = st.columns([1.5, 2, 2.5, 2])
+            with p_col1:
+                page_idx = st.number_input("Page #", min_value=1, max_value=max_pages, value=1, step=1) - 1
+
+            with p_col2:
+                pdf_layout = st.selectbox(
+                    "Layout Mode",
+                    ["Side-by-Side (Split)", "Stacked (Full Width)"],
+                    index=0,
+                    help="Side-by-Side displays Original and Sanitized pages side-by-side. Stacked displays each page at full width for maximum clarity.",
+                )
+
+            with p_col3:
+                pdf_zoom_pct = st.select_slider(
+                    "Zoom Magnification",
+                    options=[75, 100, 125, 150, 175, 200],
+                    value=100,
+                    format_func=lambda x: f"{x}%",
+                    help="Magnify the rendered PDF pages. At >100%, an interactive pan/scroll viewer lets you inspect footnotes and small author text.",
+                )
+
+            with p_col4:
+                pdf_height_choice = st.selectbox(
+                    "Viewer Height",
+                    ["Fit Window (650px)", "Expanded (850px)", "Tall (1100px)", "Full Document"],
+                    index=0,
+                    help="Adjust the maximum height of the viewer container.",
+                )
+
+            # Map height
+            if "650px" in pdf_height_choice:
+                pdf_c_height = "650px"
+            elif "850px" in pdf_height_choice:
+                pdf_c_height = "850px"
+            elif "1100px" in pdf_height_choice:
+                pdf_c_height = "1100px"
+            else:
+                pdf_c_height = "none"
 
             cache_key = f"{selected_file}_{page_idx}_{preview_dpi}"
             if cache_key not in st.session_state.preview_cache:
@@ -656,33 +742,138 @@ if st.session_state.results:
 
             overlay_img, clean_img = st.session_state.preview_cache[cache_key]
 
-            col_orig, col_clean = st.columns(2)
-            with col_orig:
-                st.markdown("##### 🔴 Original PDF (Detected Redaction Boundaries)")
-                st.image(overlay_img, use_container_width=True)
+            def render_zoomable_pdf_box(img: Image.Image, zoom_pct: int, height_val: str, caption: str):
+                b64 = pil_to_base64_png(img)
+                overflow_css = "overflow: auto;" if height_val != "none" or zoom_pct > 100 else "overflow: hidden;"
+                max_h_css = f"max-height: {height_val};" if height_val != "none" else ""
+                st.markdown(
+                    f"""
+                    <div style="{overflow_css} {max_h_css} border: 1px solid #cbd5e1; border-radius: 8px; background: #334155; padding: 12px; text-align: center; box-shadow: inset 0 2px 4px rgba(0,0,0,0.15);">
+                        <img src="data:image/png;base64,{b64}" style="width: {zoom_pct}%; max-width: none; border-radius: 4px; box-shadow: 0 4px 14px rgba(0,0,0,0.35); display: inline-block;" alt="{caption}" />
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-            with col_clean:
-                st.markdown("##### ⚪ Anonymized PDF (Destructive Whitespace Fill)")
-                st.image(clean_img, use_container_width=True)
+            if pdf_layout == "Side-by-Side (Split)":
+                col_orig, col_clean = st.columns(2)
+                with col_orig:
+                    st.markdown("##### 🔴 Original PDF (Detected Redaction Boundaries)")
+                    render_zoomable_pdf_box(overlay_img, pdf_zoom_pct, pdf_c_height, "Original PDF")
+
+                with col_clean:
+                    st.markdown("##### ⚪ Anonymized PDF (Destructive Whitespace Fill)")
+                    render_zoomable_pdf_box(clean_img, pdf_zoom_pct, pdf_c_height, "Anonymized PDF")
+            else:
+                # Stacked full-width mode
+                st.markdown("##### 🔴 Original PDF (Detected Redaction Boundaries - Full Width)")
+                render_zoomable_pdf_box(overlay_img, pdf_zoom_pct, pdf_c_height, "Original PDF")
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("##### ⚪ Anonymized PDF (Destructive Whitespace Fill - Full Width)")
+                render_zoomable_pdf_box(clean_img, pdf_zoom_pct, pdf_c_height, "Anonymized PDF")
 
         else:
-            # Word (.docx) or Plain Text (.txt) Side-by-Side Text Comparison
-            col_orig, col_clean = st.columns(2)
-            with col_orig:
-                st.markdown(f"##### 🔴 Original {selected_res.file_type.upper()} (Detected Redactions Highlighted)")
-                highlighted_html = highlight_text_targets(selected_res.original_text or "", targets_for_file)
-                st.markdown(
-                    f'<div style="max-height: 550px; overflow-y: auto; background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e1; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.5; color: #1e293b;">{highlighted_html}</div>',
-                    unsafe_allow_html=True,
+            # Word (.docx) or Plain Text (.txt) Comparison & Zoom Controls
+            st.markdown(
+                """
+                <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px;">
+                    <span style="font-weight: 600; font-size: 0.9rem; color: #1e293b;">🔍 Text Inspection & Zoom Toolbar</span>
+                    <span style="font-size: 0.8rem; color: #64748b; margin-left: 8px;">Adjust font size zoom, container height, font style, and diff modes for text review.</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            txt_c1, txt_c2, txt_c3, txt_c4 = st.columns([2, 2, 2, 2])
+            with txt_c1:
+                font_size_px = st.slider(
+                    "Font Size / Text Zoom",
+                    min_value=11,
+                    max_value=28,
+                    value=14,
+                    step=1,
+                    format="%d px",
+                    help="Adjust font magnification from 11px up to 28px for comfortable reading.",
+                )
+            with txt_c2:
+                container_height_choice = st.selectbox(
+                    "Viewer Height",
+                    ["Compact (450px)", "Standard (600px)", "Expanded (850px)", "Full Document"],
+                    index=1,
+                    help="Adjust the maximum height of the text box or display full document without scrolling.",
+                )
+            with txt_c3:
+                typography_choice = st.selectbox(
+                    "Typography Style",
+                    ["Monospace (Raw / Code)", "Sans-Serif (Standard Text)"],
+                    index=0,
+                    help="Switch between monospaced font and modern readable sans-serif.",
+                )
+            with txt_c4:
+                comparison_mode = st.selectbox(
+                    "Comparison View",
+                    ["Side-by-Side Split", "Original (Highlighted)", "Anonymized Only", "Unified Diff / Changes"],
+                    index=0,
+                    help="Side-by-side comparison, single view, or unified line-by-line diff.",
                 )
 
-            with col_clean:
-                st.markdown(f"##### ⚪ Anonymized {selected_res.file_type.upper()} (Sanitized Output)")
+            # Formatting styles
+            if "450px" in container_height_choice:
+                c_height_css = "max-height: 450px; overflow-y: auto;"
+            elif "600px" in container_height_choice:
+                c_height_css = "max-height: 600px; overflow-y: auto;"
+            elif "850px" in container_height_choice:
+                c_height_css = "max-height: 850px; overflow-y: auto;"
+            else:
+                c_height_css = "max-height: none;"
+
+            font_family_css = (
+                "'JetBrains Mono', 'Courier New', monospace"
+                if "Monospace" in typography_choice
+                else "'Plus Jakarta Sans', -apple-system, sans-serif"
+            )
+            line_height = "1.65" if "Sans" in typography_choice else "1.5"
+
+            box_style = (
+                f"{c_height_css} "
+                f"background: #ffffff; "
+                f"padding: 16px; "
+                f"border-radius: 8px; "
+                f"border: 1px solid #cbd5e1; "
+                f"font-family: {font_family_css}; "
+                f"white-space: pre-wrap; "
+                f"font-size: {font_size_px}px; "
+                f"line-height: {line_height}; "
+                f"color: #1e293b; "
+                f"box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.04);"
+            )
+
+            if comparison_mode == "Side-by-Side Split":
+                col_orig, col_clean = st.columns(2)
+                with col_orig:
+                    st.markdown(f"##### 🔴 Original {selected_res.file_type.upper()} (Detected Redactions Highlighted)")
+                    highlighted_html = highlight_text_targets(selected_res.original_text or "", targets_for_file)
+                    st.markdown(f'<div style="{box_style}">{highlighted_html}</div>', unsafe_allow_html=True)
+
+                with col_clean:
+                    st.markdown(f"##### ⚪ Anonymized {selected_res.file_type.upper()} (Sanitized Output)")
+                    sanitized_escaped = html.escape(selected_res.sanitized_text or "")
+                    st.markdown(f'<div style="{box_style}">{sanitized_escaped}</div>', unsafe_allow_html=True)
+
+            elif comparison_mode == "Original (Highlighted)":
+                st.markdown(f"##### 🔴 Original {selected_res.file_type.upper()} (Detected Redactions Highlighted - Full Width)")
+                highlighted_html = highlight_text_targets(selected_res.original_text or "", targets_for_file)
+                st.markdown(f'<div style="{box_style}">{highlighted_html}</div>', unsafe_allow_html=True)
+
+            elif comparison_mode == "Anonymized Only":
+                st.markdown(f"##### ⚪ Anonymized {selected_res.file_type.upper()} (Sanitized Output - Full Width)")
                 sanitized_escaped = html.escape(selected_res.sanitized_text or "")
-                st.markdown(
-                    f'<div style="max-height: 550px; overflow-y: auto; background: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #cbd5e1; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; line-height: 1.5; color: #1e293b;">{sanitized_escaped}</div>',
-                    unsafe_allow_html=True,
-                )
+                st.markdown(f'<div style="{box_style}">{sanitized_escaped}</div>', unsafe_allow_html=True)
+
+            else:  # Unified Diff / Changes
+                st.markdown(f"##### 🔄 Unified Change Inspector (Red = Redacted Identities, Green = Preserved Text)")
+                diff_html = generate_html_diff(selected_res.original_text or "", selected_res.sanitized_text or "")
+                st.markdown(f'<div style="{box_style}">{diff_html}</div>', unsafe_allow_html=True)
 
     # --- TAB 2: AUDIT & PROCESSING LOG ---
     with tab_audit:
